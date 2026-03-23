@@ -1,0 +1,136 @@
+"""실적 발표 시뮬레이터 API 라우트"""
+
+from fastapi import APIRouter, HTTPException
+from app.services.earnings_analyzer import (
+    get_full_earnings_analysis,
+    _get_revenue_estimates,
+    _get_revenue_history,
+    _get_sec_cik,
+)
+from app.services.gemini_guidance import (
+    analyze_guidance_for_stock,
+    compute_theme_patterns,
+    is_available as gemini_available,
+    _get_cached_guidance,
+)
+
+router = APIRouter(prefix="/api/stock", tags=["earnings"])
+
+
+@router.get("/{ticker}/earnings")
+async def earnings(ticker: str):
+    """종목의 실적 발표 분석 데이터 반환"""
+    try:
+        result = await get_full_earnings_analysis(ticker)
+        # 매출 데이터 보강
+        if not result.get("revenue_estimates"):
+            result["revenue_estimates"] = _get_revenue_estimates(ticker)
+        if not result.get("revenue_history"):
+            result["revenue_history"] = _get_revenue_history(ticker)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"어닝 분석 오류: {str(e)}")
+
+
+@router.get("/{ticker}/guidance")
+async def guidance(ticker: str, max_quarters: int = 20):
+    """종목의 가이던스 AI 분석 데이터 반환
+
+    SEC 8-K → Gemini AI 분석 → 가이던스 요약/테마/감성점수
+    결과는 DB에 영구 캐싱됨 (과거 가이던스는 변하지 않음)
+
+    ★ 최적화: 캐시에 데이터가 이미 있으면 SEC/Yahoo 호출 없이 즉시 반환
+    """
+    if not gemini_available():
+        raise HTTPException(status_code=503, detail="Google API 키가 설정되지 않았습니다")
+
+    try:
+        ticker = ticker.upper()
+
+        # ★ 캐시 우선 확인 — 데이터가 이미 있으면 즉시 반환 (source_type 무관)
+        cached = await _get_cached_guidance(ticker)
+        if cached and len(cached) >= min(max_quarters, 5):
+            theme_patterns = _compute_theme_patterns_from_cache(cached)
+            return {
+                "ticker": ticker,
+                "guidance": cached,
+                "theme_patterns": theme_patterns,
+                "total_analyzed": len(cached),
+                "gemini_enabled": True,
+                "cached": True,
+            }
+
+        # 캐시 없거나 부족 → 전체 분석 실행
+        cik = _get_sec_cik(ticker)
+        if not cik:
+            raise HTTPException(status_code=404, detail=f"{ticker}의 SEC CIK를 찾을 수 없습니다")
+
+        # 어닝 히스토리 가져오기 (매칭용)
+        result = await get_full_earnings_analysis(ticker)
+        history = result.get("history", [])
+
+        # 회사명 가져오기 (Motley Fool URL 생성용)
+        try:
+            from app.services import yfinance_client
+            import asyncio
+            ov = await asyncio.to_thread(yfinance_client.get_overview, ticker)
+            company_name = ov.get("name", "")
+        except Exception:
+            company_name = ""
+
+        if not history:
+            return {"ticker": ticker, "guidance": [], "theme_patterns": {}}
+
+        # Gemini 분석 (캐싱된 것은 건너뜀)
+        guidance_list = await analyze_guidance_for_stock(
+            ticker, cik, history, max_quarters=max_quarters,
+            company_name=company_name
+        )
+
+        # 테마별 주가 패턴 계산
+        theme_patterns = compute_theme_patterns(guidance_list, history)
+
+        return {
+            "ticker": ticker,
+            "guidance": guidance_list,
+            "theme_patterns": theme_patterns,
+            "total_analyzed": len(guidance_list),
+            "gemini_enabled": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"가이던스 분석 오류: {str(e)}")
+
+
+def _compute_theme_patterns_from_cache(cached_guidance: list) -> dict:
+    """캐시된 가이던스 데이터만으로 테마 패턴 계산 (earnings_history 불필요 버전)"""
+    themes = {}
+    for g in cached_guidance:
+        key_themes = g.get("key_themes", [])
+        if isinstance(key_themes, str):
+            try:
+                import json
+                key_themes = json.loads(key_themes)
+            except Exception:
+                key_themes = []
+
+        sentiment = g.get("sentiment_score", 50)
+        # 감성 점수 기반으로 반응 추정 (실제 주가 데이터 없이)
+        estimated_reaction = (sentiment - 50) * 0.1  # 50=중립, 90=+4%, 10=-4%
+
+        for theme in key_themes:
+            if theme not in themes:
+                themes[theme] = {"count": 0, "total_reaction": 0}
+            themes[theme]["count"] += 1
+            themes[theme]["total_reaction"] += estimated_reaction
+
+    result_themes = {}
+    for theme, data in themes.items():
+        if data["count"] >= 1:
+            result_themes[theme] = {
+                "count": data["count"],
+                "avg_reaction": round(data["total_reaction"] / data["count"], 2),
+            }
+
+    return {"themes": result_themes}

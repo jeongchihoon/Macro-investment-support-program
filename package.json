@@ -1,0 +1,12 @@
+{
+  "name": "finvision",
+  "version": "0.1.0",
+  "scripts": {
+    "install:backend": "cd backend && pip install -r requirements.txt",
+    "install:frontend": "cd frontend && npm install",
+    "install:all": "npm run install:backend && npm run install:frontend",
+    "dev:backend": "cd backend && python -m uvicorn app.main:app --reload --port 8000",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "start \"FinVision Backend\" cmd /k npm run dev:backend && start \"FinVision Frontend\" cmd /k npm run dev:frontend"
+  }
+}
