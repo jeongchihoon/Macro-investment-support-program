@@ -287,22 +287,25 @@ def _load_sitemap_month(year: int, month: int) -> dict[str, list[str]]:
             resp.text
         )
 
-        # 티커별로 그룹핑 (URL에서 티커 추출)
+        # 티커별로 그룹핑 (URL에서 티커 추출 — 다양한 패턴 지원)
         ticker_map: dict[str, list[str]] = {}
         for t_url in transcript_urls:
-            # URL 패턴: .../{slug}-{TICKER}-q{Q}-{YYYY}-earnings-call-transcript/
-            # 또는: .../{slug}-{TICKER}-{TICKER}-q{Q}-... (드물게)
-            # 티커는 보통 대문자 → URL에서는 소문자
-            # 파일명 부분만 추출
             path_part = t_url.rsplit("/", 2)[-2] if t_url.endswith("/") else t_url.rsplit("/", 1)[-1]
-            # earnings-call-transcript 앞 부분에서 티커 추출
-            # 패턴: {slug}-{ticker}-q{Q}-{year}-earnings-call-transcript
-            match = re.search(r'-([a-z]{1,6})-q\d+-\d{4}-earnings-call', path_part)
+            # 패턴1: {slug}-{ticker}-q{Q}-{year}-earnings-call-transcript
+            # 패턴2: {slug}-{ticker}-{ticker}-q{Q}-... (드물게)
+            # 티커 길이 1~10자 허용 (BRK-A 등 특수 케이스 포함)
+            match = re.search(r'-([a-z]{1,10})-q\d+-\d{4}-earnings-call', path_part)
             if match:
                 t = match.group(1)
                 if t not in ticker_map:
                     ticker_map[t] = []
                 ticker_map[t].append(t_url)
+            else:
+                # 패턴3: 티커 없이 {slug}-q{Q}-{year}-earnings-call-transcript
+                # 전체 URL을 "__unmatched__" 키로 저장 (나중에 slug로 매칭)
+                if "__unmatched__" not in ticker_map:
+                    ticker_map["__unmatched__"] = []
+                ticker_map["__unmatched__"].append(t_url)
 
         logger.info(f"Sitemap {year}/{month:02d}: {len(transcript_urls)} transcripts, {len(ticker_map)} tickers")
         _sitemap_cache[key] = ticker_map
@@ -315,10 +318,12 @@ def _load_sitemap_month(year: int, month: int) -> dict[str, list[str]]:
 
 
 def _search_sitemap_transcript(ticker: str, report_date: str,
-                                quarter: int = 0, year: int = 0) -> str | None:
+                                quarter: int = 0, year: int = 0,
+                                company_name: str = "") -> str | None:
     """Motley Fool 사이트맵에서 트랜스크립트 URL 검색.
 
-    report_date 기준 해당 월 ± 1개월 사이트맵을 검색.
+    report_date 기준 해당 월 ± 2개월 사이트맵을 검색.
+    티커 매칭 실패 시 slug 기반 unmatched URL도 검색.
     Returns: 매칭되는 transcript URL 또는 None
     """
     try:
@@ -328,9 +333,9 @@ def _search_sitemap_transcript(ticker: str, report_date: str,
 
     ticker_lower = ticker.lower()
 
-    # 해당 월 ± 1개월 사이트맵 검색
+    # 해당 월 ± 2개월 사이트맵 검색 (넓은 범위)
     months_to_check = []
-    for offset in [0, -1, 1]:
+    for offset in [0, -1, 1, -2, 2]:
         m = rd.month + offset
         y = rd.year
         if m < 1:
@@ -341,9 +346,22 @@ def _search_sitemap_transcript(ticker: str, report_date: str,
             y += 1
         months_to_check.append((y, m))
 
+    # slug 변형 목록 (unmatched URL 매칭용)
+    slug_variations = _get_slug_variations(ticker, company_name)
+
     for y, m in months_to_check:
         ticker_map = _load_sitemap_month(y, m)
         urls = ticker_map.get(ticker_lower, [])
+
+        # 티커로 못 찾으면 unmatched URL에서 slug로 검색
+        if not urls:
+            unmatched = ticker_map.get("__unmatched__", [])
+            for u_url in unmatched:
+                path_part = u_url.rsplit("/", 2)[-2] if u_url.endswith("/") else u_url.rsplit("/", 1)[-1]
+                for slug in slug_variations:
+                    if path_part.startswith(slug + "-") or f"/{slug}-" in path_part:
+                        urls.append(u_url)
+                        break
 
         if not urls:
             continue
@@ -352,7 +370,6 @@ def _search_sitemap_transcript(ticker: str, report_date: str,
         if quarter and year:
             for url in urls:
                 if f"q{quarter}-{year}" in url:
-                    # 사이트맵 URL이 잘려있을 수 있음 — 완전한 URL로 복원
                     if not url.endswith("earnings-call-transcript/"):
                         url = re.sub(r'earnings-call.*$', 'earnings-call-transcript/', url)
                     logger.info(f"Sitemap found exact match: {url}")
@@ -440,7 +457,7 @@ def _fetch_earnings_transcript(ticker: str, report_date: str,
 
     # ── 2단계: 사이트맵 검색 (1 HTTP 요청으로 정확한 URL 발견) ──
     for fq, fy in quarter_candidates[:2]:
-        sitemap_url = _search_sitemap_transcript(ticker, report_date, fq, fy)
+        sitemap_url = _search_sitemap_transcript(ticker, report_date, fq, fy, company_name)
         if sitemap_url:
             text, found_url = _try_fetch_url(sitemap_url)
             if text:
@@ -656,58 +673,48 @@ def _match_filing_to_earnings(filings: list, earnings_dates: list) -> dict:
 
 # ── Gemini 분석 프롬프트 ──
 
-TRANSCRIPT_PROMPT = """당신은 월가 20년 경력의 시니어 이퀴티 리서치 애널리스트입니다.
-Goldman Sachs와 Morgan Stanley에서 섹터 리드 애널리스트를 역임했으며,
-수천 건의 어닝콜과 8-K 공시를 분석한 전문가입니다.
+TRANSCRIPT_PROMPT = """[역할] 어닝콜 전문 분석가. 경영진 발언에서 포워드 가이던스와 시장 시그널을 추출.
 
-아래는 {ticker}의 {period} 분기 어닝콜 트랜스크립트 (CEO/CFO 발언 + 애널리스트 Q&A 포함)입니다.
+[분석 대상] {ticker} {period} 어닝콜 트랜스크립트
 
-이 어닝콜을 분석하여 아래 JSON 형식으로 결과를 반환하세요.
-반드시 JSON만 반환하세요. 다른 텍스트는 포함하지 마세요.
+[집중 포인트]
+1. 다음 분기/연간 매출·마진 가이던스 (구체적 수치)
+2. Q&A에서 드러난 경영진의 자신감/우려 수준
+3. 주가 반응을 유발했을 핵심 시그널
 
-핵심 분석 포인트:
-- CEO/CFO가 다음 분기 또는 연간 전망에 대해 한 발언 (가이던스)
-- 애널리스트 Q&A에서 나온 우려 사항과 경영진 답변
-- 언급된 구체적 수치 (매출 목표, 마진 목표, 생산량, 투자 규모 등)
-- 시장이 가장 주목했을 포인트
-
+[출력] JSON만 반환. 한국어.
 {{
-  "guidance_summary": "가이던스 핵심 내용 2-3문장 요약 (한국어). CEO/CFO가 제시한 다음 분기/연간 전망 중심으로",
-  "key_themes": ["핵심 테마 태그 3-5개 (한국어, 예: 마진압박, AI투자확대, 가격인하, 수요둔화, 신제품출시)"],
-  "sentiment_score": 0-100 사이 정수 (50=중립, 0=매우부정, 100=매우긍정),
-  "revenue_guidance": "매출 가이던스 요약 (CEO/CFO가 언급한 수치 포함, 없으면 '미제시')",
-  "margin_guidance": "마진/수익성 가이던스 요약 (수치 포함, 없으면 '미제시')",
-  "specific_numbers": "언급된 구체적 수치/목표 (배달량, 생산량, 투자규모, 구독자 수 등)",
-  "ai_annotation": "이 어닝콜에서 시장이 주목했을 핵심 포인트 1-2문장 (한국어). 주가가 왜 올랐/떨어졌을지 추론",
-  "impact_factor": "주가 변동의 주요 원인 추정 (guidance/eps/revenue/macro/sentiment 중 택1)"
+  "guidance_summary": "가이던스 핵심 2-3문장. 경영진이 제시한 수치 중심",
+  "key_themes": ["테마 3-5개. 예: 마진압박, AI투자확대"],
+  "sentiment_score": 0-100 정수 (50=중립),
+  "revenue_guidance": "매출 가이던스 수치 포함 요약. 없으면 '미제시'",
+  "margin_guidance": "마진 가이던스 수치 포함 요약. 없으면 '미제시'",
+  "specific_numbers": "구체적 수치 (생산량, 투자규모, 구독자수 등)",
+  "ai_annotation": "시장이 주목했을 핵심 1-2문장. 주가 방향 추론",
+  "impact_factor": "guidance/eps/revenue/macro/sentiment 중 택1"
 }}
 
-=== 어닝콜 트랜스크립트 ===
+=== 트랜스크립트 ===
 {filing_text}
 """
 
-FILING_PROMPT = """당신은 월가 20년 경력의 시니어 이퀴티 리서치 애널리스트입니다.
-Goldman Sachs와 Morgan Stanley에서 섹터 리드 애널리스트를 역임했으며,
-수천 건의 어닝콜과 8-K 공시를 분석한 전문가입니다.
+FILING_PROMPT = """[역할] SEC 공시 분석 전문가. 8-K 프레스 릴리스에서 가이던스와 실적 시그널을 추출.
 
-아래는 {ticker}의 {period} 분기 실적 발표 8-K 공시 원문입니다.
-(어닝콜 트랜스크립트가 없어 프레스 릴리스를 분석합니다)
+[분석 대상] {ticker} {period} 8-K 공시 (트랜스크립트 미확보, 프레스 릴리스로 대체)
 
-이 공시를 분석하여 아래 JSON 형식으로 결과를 반환하세요.
-반드시 JSON만 반환하세요. 다른 텍스트는 포함하지 마세요.
-
+[출력] JSON만 반환. 한국어.
 {{
-  "guidance_summary": "가이던스 핵심 내용 2-3문장 요약 (한국어)",
-  "key_themes": ["핵심 테마 태그 3-5개 (한국어, 예: 마진압박, AI투자확대, 가격인하)"],
-  "sentiment_score": 0-100 사이 정수 (50=중립, 0=매우부정, 100=매우긍정),
-  "revenue_guidance": "매출 가이던스 요약 (수치 포함, 없으면 '미제시')",
-  "margin_guidance": "마진/수익성 가이던스 요약 (수치 포함, 없으면 '미제시')",
-  "specific_numbers": "언급된 구체적 수치/목표 (배달량, 생산량, 투자규모 등)",
-  "ai_annotation": "이 분기 실적에서 시장이 주목했을 핵심 포인트 1-2문장 (한국어). 주가가 왜 올랐/떨어졌을지 추론",
-  "impact_factor": "주가 변동의 주요 원인 추정 (guidance/eps/revenue/macro/sentiment 중 택1)"
+  "guidance_summary": "가이던스 핵심 2-3문장 요약",
+  "key_themes": ["테마 3-5개"],
+  "sentiment_score": 0-100 정수 (50=중립),
+  "revenue_guidance": "매출 가이던스. 없으면 '미제시'",
+  "margin_guidance": "마진 가이던스. 없으면 '미제시'",
+  "specific_numbers": "구체적 수치/목표",
+  "ai_annotation": "시장 주목 포인트 1-2문장",
+  "impact_factor": "guidance/eps/revenue/macro/sentiment 중 택1"
 }}
 
-=== 8-K 공시 원문 ===
+=== 8-K 공시 ===
 {filing_text}
 """
 

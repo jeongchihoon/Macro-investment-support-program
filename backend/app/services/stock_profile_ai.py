@@ -1,0 +1,175 @@
+"""Gemini AI 기반 종목별 프로필 분석 서비스
+
+각 종목에 대해:
+1. 사업 영역별 실제 경쟁사 선정
+2. 해당 종목에서 중요한 핵심 지표 선정
+
+결과는 DB에 영구 캐싱 (한 번 분석하면 재분석 안 함).
+"""
+
+import aiosqlite
+import asyncio
+import json
+import logging
+import requests
+from datetime import datetime
+
+from app.config import GOOGLE_API_KEY
+from app.database import DB_PATH
+
+logger = logging.getLogger(__name__)
+
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+
+PROFILE_PROMPT = """[역할] 종목 프로파일링 전문가. 사업 구조를 분석하여 직접 경쟁사를 식별하고, 해당 종목에 최적화된 분석 지표를 선정.
+
+[대상] {ticker} ({company_name}) | {sector} > {industry} | 시총 {market_cap}
+[사업] {description}
+
+[Task 1: 경쟁사] 사업 영역별 직접 경쟁사 선정
+- 직접 경쟁만 (간접 제외). 예: Apple 스마트폰 → 삼성, 샤오미 (O) / Microsoft (X)
+- NYSE/NASDAQ 상장 종목만 (ADR 가능: TSM, BABA 등)
+- 비상장 제외. 영역당 2-3개, 총 5-8개
+
+[Task 2: 핵심지표] 이 종목만의 핵심 분석 지표 7-10개
+같은 산업이어도 회사마다 다름. 성장주→revenue_growth, 배당주→dividend_yield
+선택 가능 목록: pe_ratio, forward_pe, pb_ratio, ev_to_ebitda, profit_margin, operating_margin, gross_margin, roe, roa, roic, total_revenue, net_income, ebitda, debt_to_equity, current_ratio, total_debt, total_cash, asset_turnover, inventory_turnover, ocf_margin, capex_to_revenue, revenue_per_share, dividend_yield, payout_ratio, revenue_growth, eps_growth, net_income_growth, operating_income_growth, beta, fcf
+
+[출력] JSON만. 한국어.
+{{
+  "competitors": [
+    {{"business_area": "영역명", "tickers": ["T1","T2"], "descriptions": ["T1 경쟁 이유","T2 경쟁 이유"]}}
+  ],
+  "key_metrics": [
+    {{"metric": "지표ID", "reason": "선택 이유"}}
+  ]
+}}
+"""
+
+
+async def get_stock_profile(ticker: str, overview: dict = None) -> dict:
+    """종목별 AI 프로필 (경쟁사 + 핵심지표) 반환. DB 캐시 우선."""
+    ticker = ticker.upper()
+
+    # 1) DB 캐시 확인
+    cached = await _get_cached_profile(ticker)
+    if cached:
+        return cached
+
+    # 2) overview 없으면 가져오기
+    if not overview:
+        from app.services import yfinance_client
+        overview = await asyncio.to_thread(yfinance_client.get_overview, ticker)
+
+    # 3) Gemini 분석
+    profile = await _analyze_with_gemini(ticker, overview)
+    if profile:
+        await _save_profile(ticker, profile)
+
+    return profile or {"competitors": [], "key_metrics": []}
+
+
+async def _get_cached_profile(ticker: str) -> dict | None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM stock_profile_ai WHERE ticker = ?",
+                (ticker,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return {
+                    "competitors": json.loads(row["competitors_json"]),
+                    "key_metrics": json.loads(row["key_metrics_json"]),
+                    "cached": True,
+                }
+    except Exception as e:
+        logger.warning("stock_profile_ai cache read error: %s", e)
+    return None
+
+
+async def _save_profile(ticker: str, profile: dict):
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO stock_profile_ai
+                (ticker, competitors_json, key_metrics_json, analyzed_at)
+                VALUES (?, ?, ?, ?)
+            """, (
+                ticker,
+                json.dumps(profile["competitors"], ensure_ascii=False),
+                json.dumps(profile["key_metrics"], ensure_ascii=False),
+                datetime.now().isoformat(),
+            ))
+            await db.commit()
+    except Exception as e:
+        logger.warning("stock_profile_ai save error: %s", e)
+
+
+async def _analyze_with_gemini(ticker: str, overview: dict) -> dict | None:
+    if not GOOGLE_API_KEY:
+        logger.warning("GOOGLE_API_KEY not set")
+        return None
+
+    company_name = overview.get("name", ticker)
+    sector = overview.get("sector", "Unknown")
+    industry = overview.get("industry", "Unknown")
+    market_cap = overview.get("market_cap", 0)
+    description = overview.get("description", "")[:500]
+
+    # 시가총액 포맷
+    if market_cap and market_cap > 1e12:
+        mc_str = f"${market_cap/1e12:.1f}T"
+    elif market_cap and market_cap > 1e9:
+        mc_str = f"${market_cap/1e9:.1f}B"
+    else:
+        mc_str = f"${market_cap:,.0f}" if market_cap else "N/A"
+
+    prompt = PROFILE_PROMPT.format(
+        ticker=ticker,
+        company_name=company_name,
+        sector=sector,
+        industry=industry,
+        market_cap=mc_str,
+        description=description,
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GOOGLE_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 2000,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    try:
+        resp = await asyncio.to_thread(
+            lambda: requests.post(url, json=payload, timeout=30)
+        )
+        if resp.status_code != 200:
+            logger.error("Gemini API error %s: %s", resp.status_code, resp.text[:200])
+            return None
+
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        result = json.loads(text)
+
+        # 유효성 검증
+        competitors = result.get("competitors", [])
+        key_metrics = result.get("key_metrics", [])
+
+        if not isinstance(competitors, list) or not isinstance(key_metrics, list):
+            logger.error("Invalid Gemini response format")
+            return None
+
+        return {
+            "competitors": competitors,
+            "key_metrics": key_metrics,
+        }
+
+    except Exception as e:
+        logger.error("Gemini stock profile error: %s", e)
+        return None

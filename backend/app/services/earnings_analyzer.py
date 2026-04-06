@@ -1120,7 +1120,8 @@ SECTOR_CONTEXT = {
 
 # ── 종목별 다중 요인 프로필 분석 ─────────────────────────
 
-def _compute_multi_factor_profile(history: list, revenue_history: list = None, sector: str = None) -> dict:
+def _compute_multi_factor_profile(history: list, revenue_history: list = None,
+                                   sector: str = None, guidance_data: list = None) -> dict:
     """종목별 다중 요인 분석 - 어떤 요인이 주가에 가장 큰 영향을 미치는지 자동 파악.
 
     Returns: {
@@ -1422,6 +1423,57 @@ def _compute_multi_factor_profile(history: list, revenue_history: list = None, s
         all_factors.append(margin_factor)
 
     # ══════════════════════════════════════════════════════════
+    # 4-c. Guidance Sentiment (가이던스 감성) — AI 트랜스크립트 분석 결과 활용
+    # ══════════════════════════════════════════════════════════
+    if guidance_data:
+        # guidance_data: [{period_end, sentiment_score, key_themes, ...}]
+        # 각 분기의 sentiment_score ↔ 주가 반응 상관관계 계산
+        guidance_by_pe = {}
+        for g in guidance_data:
+            pe = g.get("period_end")
+            sent = g.get("sentiment_score")
+            if pe and sent is not None:
+                guidance_by_pe[pe] = sent
+
+        guidance_pairs = []
+        for h in verified:
+            pe_str = h.get("period_end", "")
+            pe_date = _parse_date_safe(pe_str)
+            reaction = h.get("reaction_1d_change")
+            if reaction is None:
+                continue
+
+            # period_end 정확 매칭
+            sent = guidance_by_pe.get(pe_str)
+            # ±15일 tolerance
+            if sent is None and pe_date:
+                for g_pe, g_sent in guidance_by_pe.items():
+                    g_date = _parse_date_safe(g_pe)
+                    if g_date and abs((pe_date - g_date).days) <= 15:
+                        sent = g_sent
+                        break
+
+            if sent is not None:
+                # sentiment 50=중립, 0~100 → 정규화: (sent - 50) = -50 ~ +50
+                guidance_pairs.append((sent - 50, reaction))
+
+        if len(guidance_pairs) >= 5:
+            guidance_corr, guidance_r_sq = _pearson_correlation(guidance_pairs)
+            guidance_factor = {
+                "id": "guidance_sentiment",
+                "name": "가이던스 감성(AI분석)",
+                "name_en": "Guidance Sentiment",
+                "correlation": guidance_corr,
+                "r_squared": guidance_r_sq,
+                "weight": 0.0,
+                "direction": "positive" if guidance_corr >= 0 else "negative",
+                "reliability": "high" if guidance_r_sq >= 0.3 else ("medium" if guidance_r_sq >= 0.1 else "low"),
+                "sample_size": len(guidance_pairs),
+                "description": f"AI 트랜스크립트 감성점수 vs 주가 반응 (R²={guidance_r_sq:.3f}, n={len(guidance_pairs)})",
+            }
+            all_factors.append(guidance_factor)
+
+    # ══════════════════════════════════════════════════════════
     # 5. 요인 가중치 정규화
     # ══════════════════════════════════════════════════════════
     total_abs_corr = sum(abs(f["correlation"]) for f in all_factors)
@@ -1566,6 +1618,7 @@ def _compute_multi_factor_profile(history: list, revenue_history: list = None, s
     # Find specific factor objects for logic
     eps_f = next((f for f in all_factors if f["id"] == "eps_surprise"), None)
     rev_f = next((f for f in all_factors if f["id"] == "revenue_growth"), None)
+    guidance_f = next((f for f in all_factors if f["id"] == "guidance_sentiment"), None)
 
     if top_factor_id == "eps_surprise" and top_factor_r_sq >= 0.2:
         chart_type = "eps"
@@ -1577,9 +1630,18 @@ def _compute_multi_factor_profile(history: list, revenue_history: list = None, s
         input_factors = ["revenue_growth"]
         if eps_f and eps_f["r_squared"] >= 0.1:
             input_factors.append("eps_surprise")
+    elif top_factor_id == "guidance_sentiment" and top_factor_r_sq >= 0.15:
+        chart_type = "multi"
+        input_factors = ["guidance_sentiment"]
+        if eps_f and eps_f["r_squared"] >= 0.1:
+            input_factors.append("eps_surprise")
     else:
         chart_type = "multi"
         input_factors = [f["id"] for f in top_factors[:3]]
+
+    # guidance_sentiment가 유의미하면 항상 input_factors에 추가
+    if guidance_f and guidance_f["r_squared"] >= 0.05 and "guidance_sentiment" not in input_factors:
+        input_factors.append("guidance_sentiment")
 
     simulation_config = {
         "primary_factor": top_factor_id,
@@ -1681,6 +1743,8 @@ def _compute_multi_factor_profile(history: list, revenue_history: list = None, s
 
         # Base reasoning from sector context
         base_note = sector_notes.get(fid, "")
+        if fid == "guidance_sentiment" and not base_note:
+            base_note = "AI가 어닝콜 트랜스크립트를 분석한 감성 점수입니다. CEO/CFO 발언의 긍정/부정 톤과 가이던스 내용을 반영합니다."
 
         # Data-driven reasoning
         if r_sq >= 0.3:
@@ -1928,9 +1992,29 @@ async def get_full_earnings_analysis(ticker: str) -> dict:
     beat_count = len([h for h in classified if h["category"] == "Beat"])
     miss_count = len([h for h in classified if h["category"] == "Miss"])
 
-    # 8. 종목별 다중 요인 프로필 분석
+    # 8. 종목별 다중 요인 프로필 분석 (가이던스 데이터 포함)
     sector = overview.get("sector") if overview else None
-    stock_profile = _compute_multi_factor_profile(history, revenue_history, sector=sector)
+
+    # 가이던스 캐시에서 sentiment 데이터 가져오기 (DB에 있으면)
+    guidance_data_for_profile = []
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT period_end, sentiment_score, key_themes, impact_factor FROM guidance_analysis WHERE ticker=?",
+                (ticker,)
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                d = dict(row)
+                guidance_data_for_profile.append(d)
+    except Exception:
+        pass
+
+    stock_profile = _compute_multi_factor_profile(
+        history, revenue_history, sector=sector,
+        guidance_data=guidance_data_for_profile if guidance_data_for_profile else None
+    )
 
     return {
         "ticker": ticker,

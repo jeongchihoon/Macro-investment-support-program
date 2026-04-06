@@ -12,8 +12,8 @@ venv/
 node_modules/
 dist/
 
-# Database
-*.db
+# Database (finvision.db는 AI 분석 캐시 포함하여 공유)
+# *.db
 
 # IDE
 .vscode/

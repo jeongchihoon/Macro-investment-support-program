@@ -354,7 +354,7 @@ export default function EarningsSimulator({ ticker }) {
     })
   }, [data, sortKey, sortDir])
 
-  // 시뮬레이션 결과 (시간 가중치)
+  // 시뮬레이션 결과 (시간 가중치 + 가이던스 factor weight 반영)
   const simResult = useMemo(() => {
     if (!data?.history || simEps == null) return null
     const lastEstimate = data.current_consensus_eps || data.history[0]?.eps_estimate
@@ -380,8 +380,31 @@ export default function EarningsSimulator({ ticker }) {
     })
 
     const totalWeight = weighted.reduce((s, w) => s + w.weight, 0)
-    const weightedAvg = weighted.reduce((s, w) => s + w.reaction_1d_change * w.weight, 0) / totalWeight
-    const weightedUpProb = weighted.reduce((s, w) => s + (w.reaction_1d_change > 0 ? w.weight : 0), 0) / totalWeight * 100
+    let weightedAvg = weighted.reduce((s, w) => s + w.reaction_1d_change * w.weight, 0) / totalWeight
+    let weightedUpProb = weighted.reduce((s, w) => s + (w.reaction_1d_change > 0 ? w.weight : 0), 0) / totalWeight * 100
+
+    // ── 가이던스 감성 factor 보정 ──
+    // 가이던스 데이터가 있고, guidance_sentiment factor의 R²가 유의미하면
+    // 최근 가이던스 sentiment 경향을 예측에 반영
+    const _profile = data?.stock_profile || {}
+    const _allFactors = _profile.factors || []
+    const guidanceFactor = _allFactors.find(f => f.id === 'guidance_sentiment')
+    if (guidanceFactor && guidanceFactor.r_squared >= 0.05 && guidanceData?.guidance?.length > 0) {
+      // 최근 3분기 평균 sentiment
+      const recentGuidance = guidanceData.guidance.slice(0, 3)
+      const avgSentiment = recentGuidance.reduce((s, g) => s + (g.sentiment_score || 50), 0) / recentGuidance.length
+      const sentimentSignal = (avgSentiment - 50) / 50  // -1 ~ +1 범위
+
+      // factor weight 기반 보정 (과거 데이터에서 계산된 weight 그대로 사용)
+      const guidanceWeight = guidanceFactor.weight || 0
+      const avgVol = _profile.avg_volatility || 3
+      const guidanceAdjustment = sentimentSignal * guidanceWeight * avgVol * 2
+
+      // 가중 평균에 가이던스 보정 적용
+      weightedAvg = weightedAvg + guidanceAdjustment
+      // 상승 확률도 보정 (sentiment 긍정이면 상승 확률 상향)
+      weightedUpProb = Math.max(0, Math.min(100, weightedUpProb + sentimentSignal * guidanceWeight * 30))
+    }
 
     const reactions = similar.map(s => s.reaction_1d_change).sort((a, b) => a - b)
     const p10 = reactions[Math.floor(reactions.length * 0.1)] || reactions[0]
@@ -396,8 +419,9 @@ export default function EarningsSimulator({ ticker }) {
       p90: round2(p90),
       upProbability: round2(weightedUpProb),
       similar: similar.slice(0, 5),
+      guidanceApplied: !!(guidanceFactor && guidanceFactor.r_squared >= 0.05 && guidanceData?.guidance?.length > 0),
     }
-  }, [data, simEps])
+  }, [data, simEps, guidanceData])
 
   function handleSort(key) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -469,6 +493,7 @@ export default function EarningsSimulator({ ticker }) {
     revenue_growth: TrendingUp,
     revenue_acceleration: Zap,
     margin_trend: PieChart,
+    guidance_sentiment: Brain,
   }
 
   return (
@@ -808,7 +833,7 @@ export default function EarningsSimulator({ ticker }) {
                   <div className="text-[10px] text-slate-600">
                     <span className="font-semibold text-indigo-700">이 종목의 시뮬레이션 기반:</span>{' '}
                     {simConfig.input_factors.map(f => {
-                      const names = { eps_surprise: 'EPS 서프라이즈', revenue_growth: '매출 성장률', revenue_acceleration: '매출 가속도', margin_trend: '수익성 변화' }
+                      const names = { eps_surprise: 'EPS 서프라이즈', revenue_growth: '매출 성장률', revenue_acceleration: '매출 가속도', margin_trend: '수익성 변화', guidance_sentiment: '가이던스 감성(AI)' }
                       return names[f] || f
                     }).join(', ')}
                     {guidanceAnalysis.guidance_influence_score >= 30 && (
@@ -960,8 +985,13 @@ export default function EarningsSimulator({ ticker }) {
                             </div>
                           )}
 
-                          <div className="text-[10px] text-slate-500">
-                            유사 사례 <span className="font-bold">{simResult.count}건</span> (서프라이즈 ±3%)
+                          <div className="text-[10px] text-slate-500 flex items-center gap-2">
+                            <span>유사 사례 <span className="font-bold">{simResult.count}건</span> (서프라이즈 ±3%)</span>
+                            {simResult.guidanceApplied && (
+                              <span className="text-purple-600 font-semibold flex items-center gap-1">
+                                <Brain size={10} /> 가이던스 감성 반영됨
+                              </span>
+                            )}
                           </div>
                           {simResult.similar.length > 0 && (
                             <div className="space-y-1 max-h-20 overflow-y-auto">
@@ -1157,8 +1187,22 @@ export default function EarningsSimulator({ ticker }) {
                                 )}
                                 {g.specific_numbers && (
                                   <div className="bg-blue-50/50 rounded px-2 py-1.5 border border-blue-100">
-                                    <div className="text-[8px] font-semibold text-blue-500 uppercase">주요 수치</div>
-                                    <div className="text-[10px] text-blue-800">{g.specific_numbers}</div>
+                                    <div className="text-[8px] font-semibold text-blue-500 uppercase mb-1">주요 수치</div>
+                                    {typeof g.specific_numbers === 'object' ? (
+                                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                                        {Object.entries(g.specific_numbers).slice(0, 10).map(([k, v]) => (
+                                          <div key={k} className="text-[10px] text-blue-800 flex justify-between gap-1">
+                                            <span className="text-blue-500 truncate" title={k.replace(/_/g, ' ')}>{k.replace(/_/g, ' ')}</span>
+                                            <span className="font-medium whitespace-nowrap">{v}</span>
+                                          </div>
+                                        ))}
+                                        {Object.keys(g.specific_numbers).length > 10 && (
+                                          <div className="text-[9px] text-blue-400 col-span-2">...외 {Object.keys(g.specific_numbers).length - 10}개</div>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <div className="text-[10px] text-blue-800">{g.specific_numbers}</div>
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -1181,7 +1225,7 @@ export default function EarningsSimulator({ ticker }) {
 
                   {/* 안내 */}
                   <p className="text-[9px] text-slate-400 text-center">
-                    SEC EDGAR 8-K 공시를 Gemini AI가 분석한 결과입니다. 과거 가이던스 패턴을 참고하여 향후 발표에 대비하세요.
+                    어닝콜 트랜스크립트를 Gemini AI가 분석한 결과입니다. 과거 가이던스 패턴과 감성 점수가 시뮬레이션에 반영됩니다.
                   </p>
                 </div>
               )}

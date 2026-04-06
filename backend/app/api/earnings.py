@@ -103,6 +103,82 @@ async def guidance(ticker: str, max_quarters: int = 20):
         raise HTTPException(status_code=500, detail=f"가이던스 분석 오류: {str(e)}")
 
 
+@router.get("/{ticker}/guidance-accuracy")
+async def get_guidance_accuracy(ticker: str):
+    """가이던스 감성 vs 실제 어닝 서프라이즈 정확도 분석"""
+    import asyncio
+
+    ticker = ticker.upper()
+
+    # 캐싱된 가이던스 데이터 가져오기
+    cached = await _get_cached_guidance(ticker)
+    if not cached:
+        return {"ticker": ticker, "accuracy": None, "quarters": [], "message": "가이던스 데이터 없음"}
+
+    # 어닝 히스토리 가져오기
+    try:
+        earnings = await get_full_earnings_analysis(ticker)
+    except Exception:
+        return {"ticker": ticker, "accuracy": None, "quarters": [], "message": "어닝 데이터 조회 실패"}
+
+    history = earnings.get("history", [])
+
+    # period_end → 실제 결과 매핑
+    actual_map = {}
+    for h in history:
+        pe = h.get("period_end")
+        if pe and h.get("surprise_pct") is not None:
+            actual_map[pe] = {
+                "surprise_pct": h["surprise_pct"],
+                "beat": h.get("surprise_pct", 0) > 0,
+                "reaction_1d": h.get("reaction_1d_change"),
+            }
+
+    quarters = []
+    correct = 0
+    total = 0
+
+    for g in cached:
+        pe = g.get("period_end")
+        if not pe or pe not in actual_map:
+            continue
+
+        actual = actual_map[pe]
+        sentiment = g.get("sentiment_score", 50)
+
+        # 가이던스 긍정(>50)이고 실제 beat이면 정확, 부정(<50)이고 miss이면 정확
+        guidance_positive = sentiment > 50
+        actually_beat = actual["beat"]
+
+        is_correct = guidance_positive == actually_beat
+        if is_correct:
+            correct += 1
+        total += 1
+
+        quarters.append({
+            "period_end": pe,
+            "period": g.get("period", pe),
+            "sentiment_score": sentiment,
+            "guidance_positive": guidance_positive,
+            "actually_beat": actually_beat,
+            "surprise_pct": actual["surprise_pct"],
+            "reaction_1d": actual["reaction_1d"],
+            "correct": is_correct,
+            "guidance_summary": g.get("guidance_summary", ""),
+            "themes": (g.get("key_themes") or [])[:3],
+        })
+
+    accuracy = round(correct / total * 100, 1) if total > 0 else None
+
+    return {
+        "ticker": ticker,
+        "accuracy": accuracy,
+        "correct": correct,
+        "total": total,
+        "quarters": sorted(quarters, key=lambda x: x["period_end"], reverse=True),
+    }
+
+
 def _compute_theme_patterns_from_cache(cached_guidance: list) -> dict:
     """캐시된 가이던스 데이터만으로 테마 패턴 계산 (earnings_history 불필요 버전)"""
     themes = {}

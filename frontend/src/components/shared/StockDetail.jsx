@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
-import { TrendingUp, TrendingDown, Sparkles, CalendarDays, HelpCircle, Star, BarChart3, X, Check } from 'lucide-react'
+import { TrendingUp, TrendingDown, Sparkles, CalendarDays, HelpCircle, Star, BarChart3, X, Check, ChevronDown, Users, Scale, Calendar, Target } from 'lucide-react'
 import { ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts'
 import PriceChart from './PriceChart'
 import { stockAPI } from '../../api/index'
@@ -9,6 +9,10 @@ import { stockAPI } from '../../api/index'
 const FilingList = lazy(() => import('./FilingList'))
 const NewsFeed = lazy(() => import('./NewsFeed'))
 const EarningsSimulator = lazy(() => import('./EarningsSimulator'))
+const AnalystVsAI = lazy(() => import('./AnalystVsAI'))
+const CompetitorComparison = lazy(() => import('./CompetitorComparison'))
+const EarningsCalendar = lazy(() => import('./EarningsCalendar'))
+const GuidanceAccuracy = lazy(() => import('./GuidanceAccuracy'))
 
 /* ── IntersectionObserver 기반 지연 렌더링 래퍼 ── */
 function LazySection({ children, fallback, rootMargin = '200px' }) {
@@ -35,6 +39,62 @@ function LazySection({ children, fallback, rootMargin = '200px' }) {
       ) : (
         fallback || <div className="h-32 bg-white rounded-xl border border-slate-200 animate-pulse" />
       )}
+    </div>
+  )
+}
+
+/* ── 접기/펴기 섹션 래퍼 ── */
+function CollapsibleSection({ title, icon: Icon, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-3.5 hover:bg-slate-50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          {Icon && <Icon size={15} className="text-indigo-400" />}
+          <span className="text-sm font-semibold text-slate-700">{title}</span>
+        </div>
+        <ChevronDown size={16} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && <div className="mt-2">{children}</div>}
+    </div>
+  )
+}
+
+/* ── 기업 소개 (번역 + 펼치기/접기) ── */
+function DescriptionBlock({ ticker, text }) {
+  const [expanded, setExpanded] = useState(false)
+  const [translated, setTranslated] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    setExpanded(false)
+    setTranslated(null)
+  }, [ticker])
+
+  useEffect(() => {
+    if (!expanded || translated || loading) return
+    setLoading(true)
+    stockAPI.translateText(text)
+      .then(res => setTranslated(res.data?.translated || text))
+      .catch(() => setTranslated(text))
+      .finally(() => setLoading(false))
+  }, [expanded, text, translated, loading])
+
+  return (
+    <div className="mt-4">
+      <div className={`text-xs text-slate-400 leading-relaxed ${expanded ? '' : 'line-clamp-2'}`}>
+        {expanded ? (loading ? '번역 중...' : translated || text) : text}
+      </div>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 mt-1 text-[10px] text-indigo-400 hover:text-indigo-600 transition-colors"
+      >
+        <span>{expanded ? '접기' : '더보기 (한국어)'}</span>
+        <ChevronDown size={12} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
     </div>
   )
 }
@@ -175,7 +235,7 @@ function MetricTooltip({ label, desc, sector, sectorAvg, avgKey }) {
 }
 
 /* ── 지표 카드 컴포넌트 ── */
-function MetricCard({ metricKey, value, overview, isKeyMetric, isSelected, onClick }) {
+function MetricCard({ metricKey, value, overview, isKeyMetric, isSelected, onClick, aiReason }) {
   const info = METRIC_INFO[metricKey]
   if (!info) return null
   const isChartable = CHARTABLE_METRICS.has(metricKey)
@@ -202,7 +262,7 @@ function MetricCard({ metricKey, value, overview, isKeyMetric, isSelected, onCli
       }`}
     >
       {isKeyMetric && (
-        <Star size={10} className="absolute top-2 right-2 text-amber-400 fill-amber-400" />
+        <Star size={10} className="absolute top-2 right-2 text-amber-400 fill-amber-400" title={aiReason || ''} />
       )}
       <div className="flex items-start gap-2">
         {/* 체크박스 (차트 가능한 지표만) */}
@@ -656,6 +716,7 @@ export default function StockDetail({ ticker }) {
   const [aiResult, setAiResult] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
   const [selectedMetrics, setSelectedMetrics] = useState([])
+  const [aiKeyMetrics, setAiKeyMetrics] = useState(null) // AI 종목별 핵심지표
 
   useEffect(() => {
     if (!ticker) return
@@ -685,6 +746,20 @@ export default function StockDetail({ ticker }) {
       })
       .catch(() => setOverview({ error: true }))
       .finally(() => setLoading(false))
+  }, [ticker])
+
+  // ── AI 종목별 핵심지표 가져오기 (competitors API에서) ──
+  useEffect(() => {
+    if (!ticker) return
+    setAiKeyMetrics(null)
+    stockAPI.getCompetitors(ticker)
+      .then(r => {
+        const metrics = r.data?.key_metrics
+        if (metrics && metrics.length > 0) {
+          setAiKeyMetrics(metrics)
+        }
+      })
+      .catch(() => {})
   }, [ticker])
 
   // ── 30초마다 주가 자동 갱신 ──
@@ -729,7 +804,10 @@ export default function StockDetail({ ticker }) {
     ? ((overview.current_price - overview['52w_low']) / overview['52w_low'] * 100).toFixed(1)
     : null
 
-  const keyMetrics = overview?.key_metrics || []
+  // AI 종목별 핵심지표 (있으면 AI, 없으면 섹터 기반 폴백)
+  const keyMetrics = aiKeyMetrics
+    ? aiKeyMetrics.map(m => m.metric)
+    : (overview?.key_metrics || [])
 
   return (
     <div className="space-y-5">
@@ -775,96 +853,11 @@ export default function StockDetail({ ticker }) {
             </div>
           )}
 
-          {overview.description && (
-            <p className="text-xs text-slate-400 mt-4 leading-relaxed line-clamp-2">{overview.description}</p>
-          )}
+          {overview.description && <DescriptionBlock ticker={ticker} text={overview.description} />}
         </div>
       )}
 
-      {/* ── 재무 지표 그리드 (그룹별) ── */}
-      {overview && !overview.error && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              📊 재무 지표
-              <span className="text-[10px] text-slate-400 font-normal">(☑ 체크하면 히스토리 차트에 추가)</span>
-            </h3>
-            <div className="flex items-center gap-3">
-              {keyMetrics.length > 0 && (
-                <div className="flex items-center gap-1 text-[10px] text-amber-600">
-                  <Star size={10} className="fill-amber-400 text-amber-400" />
-                  <span>{overview.sector} 핵심 지표</span>
-                </div>
-              )}
-              <div className="flex items-center gap-1 text-[10px] text-slate-400">
-                <div className="w-3 h-3 rounded border border-slate-300 flex items-center justify-center">
-                  <Check size={7} className="text-slate-400" strokeWidth={3} />
-                </div>
-                <span>= 차트 추가 가능</span>
-              </div>
-            </div>
-          </div>
-
-          {METRIC_GROUPS.map(group => {
-            const validKeys = group.keys.filter(k => overview[k] != null || CHARTABLE_METRICS.has(k))
-            if (validKeys.length === 0) return null
-            return (
-              <div key={group.title}>
-                <p className="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider">{group.title}</p>
-                <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2.5">
-                  {validKeys.map(key => (
-                    <MetricCard
-                      key={key}
-                      metricKey={key}
-                      value={overview[key]}
-                      overview={overview}
-                      isKeyMetric={keyMetrics.includes(key)}
-                      isSelected={selectedMetrics.includes(key)}
-                      onClick={toggleMetric}
-                    />
-                  ))}
-                </div>
-              </div>
-            )
-          })}
-
-          {/* 목표가 범위 별도 표시 */}
-          {overview.target_low != null && overview.target_high != null && (
-            <div className="bg-white rounded-xl border border-slate-200 p-4">
-              <p className="text-[11px] text-slate-400 font-semibold mb-2">애널리스트 목표가 범위</p>
-              <div className="flex items-center gap-4">
-                <span className="text-sm text-red-500 font-semibold">${overview.target_low.toFixed(0)}</span>
-                <div className="flex-1 h-2 bg-slate-100 rounded-full relative overflow-hidden">
-                  {overview.current_price && (
-                    <div
-                      className="absolute top-0 h-full bg-gradient-to-r from-indigo-400 to-indigo-600 rounded-full"
-                      style={{
-                        left: '0%',
-                        width: `${Math.min(100, Math.max(0, (overview.current_price - overview.target_low) / (overview.target_high - overview.target_low) * 100))}%`
-                      }}
-                    />
-                  )}
-                </div>
-                <span className="text-sm text-emerald-600 font-semibold">${overview.target_high.toFixed(0)}</span>
-              </div>
-              {overview.target_mean && (
-                <p className="text-xs text-slate-500 mt-1.5">평균 목표가: <span className="font-semibold text-indigo-600">${overview.target_mean.toFixed(2)}</span></p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── 지표 히스토리 차트 ── */}
-      {selectedMetrics.length > 0 && (
-        <MetricHistoryChart
-          ticker={ticker}
-          selectedMetrics={selectedMetrics}
-          onClose={() => setSelectedMetrics([])}
-        />
-      )}
-
-      {/* ── AI 분석 ── */}
+      {/* ── AI 종합 분석 ── */}
       {overview && !overview.error && (
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
           <button
@@ -893,6 +886,90 @@ export default function StockDetail({ ticker }) {
       {/* ── 주가 차트 ── */}
       <PriceChart ticker={ticker} />
 
+      {/* ── 재무 지표 그리드 (그룹별, 접기 가능) ── */}
+      {overview && !overview.error && (
+        <CollapsibleSection title="재무 지표" icon={BarChart3} defaultOpen={false}>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <span className="text-[10px] text-slate-400">(☑ 체크하면 히스토리 차트에 추가)</span>
+              <div className="flex items-center gap-3">
+                {keyMetrics.length > 0 && (
+                  <div className="flex items-center gap-1 text-[10px] text-amber-600">
+                    <Star size={10} className="fill-amber-400 text-amber-400" />
+                    <span>{aiKeyMetrics ? 'AI 추천 핵심 지표' : `${overview.sector} 핵심 지표`}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                  <div className="w-3 h-3 rounded border border-slate-300 flex items-center justify-center">
+                    <Check size={7} className="text-slate-400" strokeWidth={3} />
+                  </div>
+                  <span>= 차트 추가 가능</span>
+                </div>
+              </div>
+            </div>
+
+            {METRIC_GROUPS.map(group => {
+              const validKeys = group.keys.filter(k => overview[k] != null || CHARTABLE_METRICS.has(k))
+              if (validKeys.length === 0) return null
+              return (
+                <div key={group.title}>
+                  <p className="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider">{group.title}</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2.5">
+                    {validKeys.map(key => (
+                      <MetricCard
+                        key={key}
+                        metricKey={key}
+                        value={overview[key]}
+                        overview={overview}
+                        isKeyMetric={keyMetrics.includes(key)}
+                        isSelected={selectedMetrics.includes(key)}
+                        onClick={toggleMetric}
+                        aiReason={aiKeyMetrics?.find(m => m.metric === key)?.reason}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* 목표가 범위 별도 표시 */}
+            {overview.target_low != null && overview.target_high != null && (
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-[11px] text-slate-400 font-semibold mb-2">애널리스트 목표가 범위</p>
+                <div className="flex items-center gap-4">
+                  <span className="text-sm text-red-500 font-semibold">${overview.target_low.toFixed(0)}</span>
+                  <div className="flex-1 h-2 bg-slate-100 rounded-full relative overflow-hidden">
+                    {overview.current_price && (
+                      <div
+                        className="absolute top-0 h-full bg-gradient-to-r from-indigo-400 to-indigo-600 rounded-full"
+                        style={{
+                          left: '0%',
+                          width: `${Math.min(100, Math.max(0, (overview.current_price - overview.target_low) / (overview.target_high - overview.target_low) * 100))}%`
+                        }}
+                      />
+                    )}
+                  </div>
+                  <span className="text-sm text-emerald-600 font-semibold">${overview.target_high.toFixed(0)}</span>
+                </div>
+                {overview.target_mean && (
+                  <p className="text-xs text-slate-500 mt-1.5">평균 목표가: <span className="font-semibold text-indigo-600">${overview.target_mean.toFixed(2)}</span></p>
+                )}
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+      )}
+
+
+      {/* ── 지표 히스토리 차트 ── */}
+      {selectedMetrics.length > 0 && (
+        <MetricHistoryChart
+          ticker={ticker}
+          selectedMetrics={selectedMetrics}
+          onClose={() => setSelectedMetrics([])}
+        />
+      )}
+
       {/* ── 공시 + 뉴스 (스크롤 시 지연 로드) ── */}
       <LazySection>
         <div className="grid grid-cols-2 gap-5">
@@ -901,15 +978,40 @@ export default function StockDetail({ ticker }) {
         </div>
       </LazySection>
 
-      {/* ── 실적 발표 시뮬레이터 (스크롤 시 지연 로드, overview 불필요) ── */}
-      <LazySection fallback={
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 animate-pulse">
-          <div className="h-5 w-40 bg-slate-200 rounded mb-4" />
-          <div className="h-48 bg-slate-100 rounded-xl" />
-        </div>
-      }>
-        <EarningsSimulator ticker={ticker} />
-      </LazySection>
+      {/* ── 경쟁사 비교 ── */}
+      <CollapsibleSection title="AI 경쟁사 분석" icon={Users}>
+        <LazySection>
+          <CompetitorComparison ticker={ticker} />
+        </LazySection>
+      </CollapsibleSection>
+
+      {/* ── 실적 발표 시뮬레이터 ── */}
+      <CollapsibleSection title="실적 발표 시뮬레이터" icon={BarChart3}>
+        <LazySection>
+          <EarningsSimulator ticker={ticker} />
+        </LazySection>
+      </CollapsibleSection>
+
+      {/* ── 애널리스트 vs AI 비교 ── */}
+      <CollapsibleSection title="애널리스트 vs AI 분석" icon={Scale}>
+        <LazySection>
+          <AnalystVsAI ticker={ticker} />
+        </LazySection>
+      </CollapsibleSection>
+
+      {/* ── 실적 발표 캘린더 ── */}
+      <CollapsibleSection title="실적 캘린더" icon={Calendar}>
+        <LazySection>
+          <EarningsCalendar ticker={ticker} />
+        </LazySection>
+      </CollapsibleSection>
+
+      {/* ── 가이던스 정확도 ── */}
+      <CollapsibleSection title="가이던스 적중률" icon={Target}>
+        <LazySection>
+          <GuidanceAccuracy ticker={ticker} />
+        </LazySection>
+      </CollapsibleSection>
     </div>
   )
 }

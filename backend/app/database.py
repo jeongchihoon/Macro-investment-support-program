@@ -85,4 +85,13 @@ async def init_db():
                 UNIQUE(ticker, period_end)
             )
         """)
+        # ── AI 종목 프로필 캐시 (경쟁사 + 핵심지표) ──
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS stock_profile_ai (
+                ticker TEXT PRIMARY KEY,
+                competitors_json TEXT,
+                key_metrics_json TEXT,
+                analyzed_at TEXT NOT NULL
+            )
+        """)
         await db.commit()

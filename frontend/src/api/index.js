@@ -28,6 +28,11 @@ export const stockAPI = {
   aiAnalyze: (ticker) => api.post(`/stock/${ticker}/ai-analyze`),
   getEarnings: (ticker) => api.get(`/stock/${ticker}/earnings`),
   getGuidance: (ticker, maxQuarters = 20) => api.get(`/stock/${ticker}/guidance`, { params: { max_quarters: maxQuarters }, timeout: 120000 }),
+  getCompetitors: (ticker) => api.get(`/stock/${ticker}/competitors`),
+  getEarningsCalendar: (ticker) => api.get(`/stock/${ticker}/earnings-calendar`),
+  getGuidanceAccuracy: (ticker) => api.get(`/stock/${ticker}/guidance-accuracy`),
+  getAnalystVsAI: (ticker) => api.get(`/stock/${ticker}/analyst-vs-ai`),
+  translateText: (text) => api.post('/stock/translate', { text }),
 }
 
 // 포트폴리오
