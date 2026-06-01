@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
-import { TrendingUp, TrendingDown, Sparkles, CalendarDays, HelpCircle, Star, BarChart3, X, Check, ChevronDown, Users, Scale, Calendar, Target } from 'lucide-react'
+import { TrendingUp, TrendingDown, CalendarDays, HelpCircle, Star, BarChart3, X, Check, ChevronDown, Users, Scale, Calendar, Target, FlaskConical, FileText, Newspaper } from 'lucide-react'
 import { ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts'
 import PriceChart from './PriceChart'
 import { stockAPI } from '../../api/index'
@@ -13,6 +13,7 @@ const AnalystVsAI = lazy(() => import('./AnalystVsAI'))
 const CompetitorComparison = lazy(() => import('./CompetitorComparison'))
 const EarningsCalendar = lazy(() => import('./EarningsCalendar'))
 const GuidanceAccuracy = lazy(() => import('./GuidanceAccuracy'))
+const StockResearchChat = lazy(() => import('./StockResearchChat'))
 
 /* ── IntersectionObserver 기반 지연 렌더링 래퍼 ── */
 function LazySection({ children, fallback, rootMargin = '200px' }) {
@@ -713,14 +714,13 @@ function SkeletonCard() {
 export default function StockDetail({ ticker }) {
   const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [aiResult, setAiResult] = useState(null)
-  const [aiLoading, setAiLoading] = useState(false)
   const [selectedMetrics, setSelectedMetrics] = useState([])
   const [aiKeyMetrics, setAiKeyMetrics] = useState(null) // AI 종목별 핵심지표
+  const [showResearchChat, setShowResearchChat] = useState(false)
 
   useEffect(() => {
     if (!ticker) return
-    setAiResult(null)
+    setShowResearchChat(false)
     setSelectedMetrics([])
 
     // 캐시 확인
@@ -777,14 +777,6 @@ export default function StockDetail({ ticker }) {
     }, 30000)
     return () => clearInterval(interval)
   }, [ticker, overview?.ticker])
-
-  const handleAiAnalyze = () => {
-    setAiLoading(true)
-    stockAPI.aiAnalyze(ticker)
-      .then(r => setAiResult(r.data))
-      .catch(() => setAiResult({ status: 'error', message: '오류가 발생했습니다.' }))
-      .finally(() => setAiLoading(false))
-  }
 
   const toggleMetric = (key) => {
     setSelectedMetrics(prev =>
@@ -854,32 +846,6 @@ export default function StockDetail({ ticker }) {
           )}
 
           {overview.description && <DescriptionBlock ticker={ticker} text={overview.description} />}
-        </div>
-      )}
-
-      {/* ── AI 종합 분석 ── */}
-      {overview && !overview.error && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
-          <button
-            onClick={handleAiAnalyze}
-            disabled={aiLoading}
-            className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-xl text-sm font-semibold hover:from-indigo-600 hover:to-purple-600 transition-all disabled:opacity-50 shadow-md shadow-indigo-200"
-          >
-            <Sparkles size={15} />
-            {aiLoading ? 'AI 분석 중...' : 'AI 종합 분석'}
-          </button>
-
-          {aiResult && (
-            <div className={`mt-4 p-4 rounded-xl text-xs leading-relaxed ${
-              aiResult.status === 'disabled'
-                ? 'bg-amber-50 text-amber-700 border border-amber-200'
-                : aiResult.status === 'success'
-                ? 'bg-indigo-50 text-slate-600 border border-indigo-200'
-                : 'bg-red-50 text-red-600'
-            }`}>
-              {aiResult.analysis || aiResult.message}
-            </div>
-          )}
         </div>
       )}
 
@@ -970,13 +936,19 @@ export default function StockDetail({ ticker }) {
         />
       )}
 
-      {/* ── 공시 + 뉴스 (스크롤 시 지연 로드) ── */}
-      <LazySection>
-        <div className="grid grid-cols-2 gap-5">
+      {/* ── SEC 공시 (기본 접힘) ── */}
+      <CollapsibleSection title="SEC 공시" icon={FileText} defaultOpen={false}>
+        <LazySection>
           <FilingList ticker={ticker} />
+        </LazySection>
+      </CollapsibleSection>
+
+      {/* ── 뉴스 (기본 접힘) ── */}
+      <CollapsibleSection title="뉴스" icon={Newspaper} defaultOpen={false}>
+        <LazySection>
           <NewsFeed ticker={ticker} />
-        </div>
-      </LazySection>
+        </LazySection>
+      </CollapsibleSection>
 
       {/* ── 경쟁사 비교 ── */}
       <CollapsibleSection title="AI 경쟁사 분석" icon={Users}>
@@ -1012,6 +984,33 @@ export default function StockDetail({ ticker }) {
           <GuidanceAccuracy ticker={ticker} />
         </LazySection>
       </CollapsibleSection>
+
+      {/* ── 심층 리서치 플로팅 버튼 + 사이드 패널 ── */}
+      {createPortal(
+        <>
+          {!showResearchChat && (
+            <button
+              onClick={() => setShowResearchChat(true)}
+              className="fixed bottom-8 right-8 z-50 flex items-center gap-2 px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl text-sm font-semibold shadow-lg shadow-indigo-400/40 transition-all hover:scale-105 active:scale-95"
+            >
+              <FlaskConical size={16} />
+              심층 리서치
+            </button>
+          )}
+          {showResearchChat && (
+            <div className="fixed top-0 right-0 h-screen w-[420px] z-50 shadow-2xl shadow-slate-900/20">
+              <Suspense fallback={
+                <div className="h-full bg-white border-l border-slate-200 flex items-center justify-center text-slate-400 text-sm">
+                  로딩 중...
+                </div>
+              }>
+                <StockResearchChat ticker={ticker} onClose={() => setShowResearchChat(false)} />
+              </Suspense>
+            </div>
+          )}
+        </>,
+        document.body
+      )}
     </div>
   )
 }
