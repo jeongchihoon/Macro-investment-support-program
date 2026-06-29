@@ -41,6 +41,7 @@
 - **D17 Top-K 선정 방식** = **혼합(A)**. 시그널·스토리 동일 풀에서 impact_score 내림차순 Top-K. 슬롯 배정 없음 — 그날 뉴스에 따라 구성이 달라지는 것이 정직하고, §8에서 스토리는 자연히 높은 impact를 받도록 설계됨 (2026-06-29)
 - **D18 §9 최종 랭킹 규칙** = §8 impact를 기본값으로 하되, 다중 이벤트 스토리·deep research·출처 다양성은 보너스, 티커 없음·법률광고성 class-action 알림은 패널티. 동일 primary ticker 과점과 법률광고 후보 수를 cap으로 제한한다. 억지로 10개를 채우지 않고 `min_final_score`를 통과한 후보만 노출한다. (2026-06-29)
 - **D10 뉴스 API** = **Polygon.io ticker news**부터 시작. `POLYGON_API_KEY` 보유, `PolygonNewsCollector`를 `BaseCollector` 계약으로 추가하고 registry 기본 수집기에 포함. `source_id=polygon_news`, `trust_tier=2`, API 제공 tickers를 직접티커 초기값으로 사용하되 경량 분류에서 오탐 보정. (2026-06-29)
+- **D19 RSS 다리 확장(저널리즘+거시)** = 설계상 등급 3 RSS 슬롯을 채움. **라이브 실측으로 죽은/동결 피드 사전 제거**(CNBC Markets 3d정체·Earnings dead, MW RealtimeHeadlines 383d동결, Treasury·BLS URL dead → 제외). 추가: 저널=Google News(markets/business)·Yahoo Finance·CNBC Top/Economy·MW TopStories, 거시=Google News(Fed/CPI/jobs)·Fed press_all(버스티지만 고임팩트라 유지). **Google News는 `entry.source`에서 실제 매체(WSJ/Reuters/Bloomberg)를 추출해 `source_name`으로, 제목의 ' - 매체' 꼬리 제거, `source_meta.publisher_url` 저장** → publisher 신뢰 신호 보존. 라이브: RSS 11→369건, Reuters·Bloomberg·WSJ·WaPo 유입 확인. ※광역 쿼리가 노이즈 매체(Insider Monkey 콘텐츠팜·Bitget·Mshale)도 들여옴 → **매체 품질 필터(denylist)가 다음 수**, 이번에 확보한 publisher 데이터로 구현 가능. (2026-06-29)
 
 - **D1 시장 범위** = 미국 단독 (2026-06-22)
 - **D2 소스** = SEC·뉴스API·RSS·시장데이터. 텔레그램·크롤링 제외 (2026-06-22)
@@ -64,7 +65,8 @@
 
 ## 현재 위치
 
-✅ **수집~중복제거(DESIGN 1~6) + §7 후보생성 + §8 AI분석층 + §9 최종랭킹 완성**: ingest2 테스트 **77/77**, ruff 통과.
+✅ **수집~중복제거(DESIGN 1~6) + §7 후보생성 + §8 AI분석층 + §9 최종랭킹 완성**: ingest2 테스트 **79/79**, ruff 통과.
+- **D19 RSS 다리 확장 ✅**: 저널리즘(Reuters·Bloomberg·WSJ·CNBC)+거시(Fed/CPI/jobs) 피드 추가, 라이브 RSS 11→369건. Google News 실매체 추출. → 노이즈 매체 denylist가 다음 품질 수.
 - §7~§8 라이브 스모크 ✅: Polygon 포함 179건 수집(168 Polygon), clusters 175, shallow 10, deep 2, §8 scoring 10.
 - §9 라이브 스모크 ✅: 10 scored → 5 final. Mavenir→M 1글자 티커 오탐 제거, class-action 알림은 패널티 적용.
 - `analyze/score.py`: Gemini structured output으로 impact·direction·confidence 재계산, 오류 시 원본 보존, 내림차순 정렬.
