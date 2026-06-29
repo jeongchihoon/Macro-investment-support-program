@@ -23,8 +23,12 @@ class FeedConfig:
     source_name: str
 
 
-# D8: 시작 피드 — 미국 시장 광역 2종 (실측으로 내용 확인). 교체/추가는 여기서.
+# 피드 목록 (D8 + D19 확장). 모두 라이브 실측으로 작동·신선도 확인.
+#   등급 3 RSS = 저널리즘 헤드라인(1군 매체) + 거시(Fed/CPI/jobs) 다리.
+#   Google News 쿼리 피드는 실제 publisher를 entry.source 에서 추출(아래 normalize).
+#   Fed press 는 버스티(FOMC 때만 발행)지만 고임팩트라 유지.
 FEEDS: list[FeedConfig] = [
+    # --- 기존(D8) ---
     FeedConfig(
         "rss_cnbc_finance",
         "https://www.cnbc.com/id/10000664/device/rss/rss.html",
@@ -34,6 +38,48 @@ FEEDS: list[FeedConfig] = [
         "rss_marketwatch_bulletins",
         "http://feeds.marketwatch.com/marketwatch/bulletins/",
         "MarketWatch Bulletins",
+    ),
+    # --- 저널리즘 확장(D19) ---
+    FeedConfig(
+        "rss_gnews_markets",
+        "https://news.google.com/rss/search?q=stock+market+when:1d&hl=en-US&gl=US&ceid=US:en",
+        "Google News",
+    ),
+    FeedConfig(
+        "rss_gnews_business",
+        "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
+        "Google News",
+    ),
+    FeedConfig(
+        "rss_yahoo_finance",
+        "https://finance.yahoo.com/news/rssindex",
+        "Yahoo Finance",
+    ),
+    FeedConfig(
+        "rss_cnbc_top",
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "CNBC Top News",
+    ),
+    FeedConfig(
+        "rss_cnbc_economy",
+        "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+        "CNBC Economy",
+    ),
+    FeedConfig(
+        "rss_marketwatch_topstories",
+        "http://feeds.marketwatch.com/marketwatch/topstories/",
+        "MarketWatch Top Stories",
+    ),
+    # --- 거시 다리(D19) ---
+    FeedConfig(
+        "rss_gnews_macro",
+        "https://news.google.com/rss/search?q=(Federal+Reserve+OR+inflation+OR+%22jobs+report%22+OR+CPI)+when:1d&hl=en-US&gl=US&ceid=US:en",
+        "Google News",
+    ),
+    FeedConfig(
+        "rss_fed_press",
+        "https://www.federalreserve.gov/feeds/press_all.xml",
+        "Federal Reserve",
     ),
 ]
 
@@ -47,9 +93,21 @@ def _parsed_dt(entry) -> datetime | None:
     return datetime(*t[:6], tzinfo=UTC) if t else None
 
 
+def _source_publisher(entry) -> tuple[str, str]:
+    """Google News 등 애그리게이터는 실제 매체를 entry.source 에 담는다.
+
+    반환: (publisher_name, publisher_href). 없으면 ("", "").
+    """
+    src = entry.get("source")
+    if not src:
+        return "", ""
+    return src.get("title", "") or "", src.get("href", "") or ""
+
+
 def _entry_to_dict(entry) -> dict:
     """원본 보관용 JSON-safe dict (struct_time → ISO)."""
     dt = _parsed_dt(entry)
+    pub_name, pub_href = _source_publisher(entry)
     return {
         "id": _native_id(entry),
         "title": entry.get("title", ""),
@@ -58,6 +116,8 @@ def _entry_to_dict(entry) -> dict:
         "author": entry.get("author", ""),
         "published": dt.isoformat() if dt else None,
         "tags": [t.get("term", "") for t in entry.get("tags", [])],
+        "source_title": pub_name,
+        "source_href": pub_href,
     }
 
 
@@ -95,21 +155,33 @@ class RssCollector(BaseCollector):
     def normalize(self, raw: RawRecord) -> NewsItem:
         d = json.loads(raw.payload)
         published = datetime.fromisoformat(d["published"]) if d.get("published") else None
+
+        # 애그리게이터(Google News)면 실제 매체명을 살리고, 제목의 " - 매체" 꼬리를 제거.
+        publisher = d.get("source_title") or ""
+        title = d.get("title", "")
+        if publisher and title.endswith(f" - {publisher}"):
+            title = title[: -(len(publisher) + 3)].rstrip()
+        source_name = publisher or self.config.source_name
+        source_meta = {"feed": raw.source_id}
+        if d.get("source_href"):
+            source_meta["publisher_url"] = d["source_href"]
+
         return NewsItem(
             item_id=self.make_item_id(raw.source_id, raw.source_native_id),
             source_id=raw.source_id,
             source_native_id=raw.source_native_id,
             trust_tier=self.trust_tier,
-            title=d.get("title", ""),
+            title=title,
             summary=d.get("summary", ""),
             url=d.get("link") or (raw.url or ""),
             canonical_url=d.get("link") or raw.url,
-            source_name=self.config.source_name,
+            source_name=source_name,
             author=d.get("author", ""),
             published_at=published,
             collected_at=raw.fetched_at,
             language="en",
             raw_category=",".join(d.get("tags", [])),
+            source_meta=source_meta,
         )
 
 
