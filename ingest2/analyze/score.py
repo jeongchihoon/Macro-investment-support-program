@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from src.causal.schema import Story
 from src.ingest.schema import Event
+from src.prompting import clip_for_prompt
 from src.research.schema import ShallowReport
 
 from ..candidates.pipeline import CandidateResult
@@ -54,6 +55,10 @@ _PROMPT_TEMPLATE = """\
 
 관련 종목: {tickers}
 
+금융 용어 주의:
+- IPO quiet period / analyst coverage restrictions는 lock-up, insider share lockups,
+  보호예수, 의무보유확약과 다른 개념이다. 원문이 구분하면 점수 판단에서도 구분하라.
+
 {events_block}
 {edges_block}"""
 
@@ -83,7 +88,7 @@ def _build_prompt(
         lines = [f"[이벤트 {i}]"]
         lines.append(f"제목: {ev.title}")
         if ev.summary and ev.summary != ev.title:
-            lines.append(f"요약: {ev.summary[:300]}")
+            lines.append(f"요약: {clip_for_prompt(ev.summary)}")
 
         sh = shallow_reports.get(eid)
         if sh and sh.background:
