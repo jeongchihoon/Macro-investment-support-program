@@ -10,6 +10,7 @@ from src.causal.schema import Story
 from src.config import GEMINI_MODEL_FAST
 from src.ingest.schema import Event
 from src.llm import gemini_client, retry_gemini
+from src.prompting import clip_for_prompt
 
 _NARRATIVE_PROMPT = """You are a financial analyst writing a Story narrative.
 
@@ -42,6 +43,8 @@ LANGUAGE RULES
 - Keep tickers (NVDA, AMD), company names (Cerebras, OpenAI), products (Blackwell, B300),
   and numeric values with units ($56.4B, 110x, 86%) in original form.
 - Do NOT invent facts. Use only information from EVENTS / CAUSAL LINKS / CLAIMS above.
+- Do NOT confuse IPO quiet period / analyst coverage restrictions with lock-up,
+  insider share lockups, 보호예수, or 의무보유확약. Translate them distinctly.
 
 Return ONLY JSON in this exact shape:
 {{
@@ -70,7 +73,7 @@ def _format_events_block(story: Story, events_by_id: dict[str, Event]) -> str:
             f"[E{i}] {ev.title}\n"
             f"  Date: {ev.occurred_at.isoformat()}\n"
             f"  Tickers: {', '.join(ev.tickers_mentioned[:6]) or '(none)'}\n"
-            f"  Summary: {ev.summary[:300]}"
+            f"  Summary: {clip_for_prompt(ev.summary)}"
         )
     return "\n\n".join(parts) or "(no events)"
 

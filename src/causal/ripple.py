@@ -41,8 +41,10 @@ narrative_long (excerpt):
 
 TASK
 Produce up to 8 ripple effects (Korean mechanisms). Each ripple is one row:
-- tier: "direct" (직접 영향: 같은 회사/섹터), "adjacent" (공급망/경쟁사/보완재), "macro" (지수/금리/원자재/환율)
-- target: ticker (NVDA), sector name (반도체, 클라우드), or macro variable (10년물 금리, 달러 인덱스)
+- tier: "direct" (직접 영향: 같은 회사/섹터),
+  "adjacent" (공급망/경쟁사/보완재), "macro" (지수/금리/원자재/환율)
+- target: ticker (NVDA), sector name (반도체, 클라우드),
+  or macro variable (10년물 금리, 달러 인덱스)
 - direction: "positive" / "negative" / "uncertain"
 - horizon: "1w" (1주), "1m" (1개월), "1q" (1분기)
 - confidence: 0.0~1.0
@@ -53,6 +55,8 @@ RULES
 - mechanism 은 본문 사실에 근거. 추측 시 confidence 낮춤 (~0.3).
 - 모든 mechanism 한국어 자연스럽게.
 - target 명확하게 (티커 또는 한국어 카테고리명).
+- IPO quiet period / analyst coverage restrictions를 lock-up, insider share lockups,
+  보호예수, 의무보유확약으로 바꿔 쓰지 말 것.
 
 Return ONLY JSON in this exact shape:
 {{

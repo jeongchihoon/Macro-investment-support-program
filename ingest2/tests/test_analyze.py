@@ -145,6 +145,26 @@ def test_build_prompt_includes_edge_mechanism():
     assert "supply chain" in prompt
 
 
+def test_build_prompt_keeps_long_summary_quiet_period_context():
+    summary = (
+        "SpaceX is poised for significant stock movement on July 7, 2026, due to "
+        "two converging catalysts: eligibility for inclusion in the Nasdaq-100 "
+        "index, which will trigger automatic buying from index funds, and the end "
+        "of the 25-calendar-day quiet period for participating underwriters, "
+        "allowing them to issue buy recommendations and price targets. However, "
+        "insider share lockups expire after the first quarterly earnings release."
+    )
+    story = mk_story("s1", ["e1"])
+    ev = mk_event("e1", title="SpaceX catalyst")
+    ev = ev.model_copy(update={"summary": summary})
+
+    prompt = _build_prompt(story, {"e1": ev}, {}, {})
+
+    assert "buy recommendations and price targets" in prompt
+    assert "quiet period" in prompt
+    assert "보호예수" in prompt
+
+
 def test_build_prompt_truncates_tickers():
     tickers = [f"T{i:02d}" for i in range(20)]
     story = mk_story("s1", ["e1"])
