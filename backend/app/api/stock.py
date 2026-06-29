@@ -4,7 +4,6 @@ from app.services import yfinance_client
 from app.services.stock_dictionary import search_local
 from app.services.sec_client import get_filings
 from app.services.news_client import get_stock_news
-from app.services.ai_client import ai_client
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
 
@@ -439,17 +438,6 @@ async def get_analyst_vs_ai(ticker: str):
         "analyst": analyst,
         "ai": ai_analysis,
     }
-
-
-@router.post("/{ticker}/ai-analyze")
-def ai_analyze(ticker: str):
-    try:
-        overview = yfinance_client.get_overview(ticker)
-        financials = yfinance_client.get_financials(ticker)
-        news_data = get_stock_news(ticker, overview.get("name", ticker), limit=5)
-        return ai_client.analyze_stock(ticker, overview, financials, news_data.get("articles", []))
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 @router.post("/translate")

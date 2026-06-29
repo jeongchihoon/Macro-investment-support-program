@@ -25,7 +25,6 @@ export const stockAPI = {
   getMetricHistory: (ticker) => api.get(`/stock/${ticker}/metric-history`),
   getFilings: (ticker) => api.get(`/stock/${ticker}/filings`),
   getNews: (ticker) => api.get(`/stock/${ticker}/news`),
-  aiAnalyze: (ticker) => api.post(`/stock/${ticker}/ai-analyze`),
   getEarnings: (ticker) => api.get(`/stock/${ticker}/earnings`),
   getGuidance: (ticker, maxQuarters = 20) => api.get(`/stock/${ticker}/guidance`, { params: { max_quarters: maxQuarters }, timeout: 120000 }),
   getCompetitors: (ticker) => api.get(`/stock/${ticker}/competitors`),
