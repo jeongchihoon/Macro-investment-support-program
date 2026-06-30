@@ -9,6 +9,7 @@
 
 import aiosqlite
 import asyncio
+import hashlib
 import json
 import logging
 import requests
@@ -20,6 +21,10 @@ from app.database import DB_PATH
 logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-2.5-flash-lite"
+
+# profile 생성 설정의 의미적 버전. context/output schema 의미가 바뀔 때만 +1.
+# (함수 코드 자체는 hash에 넣지 않는다 — 무해한 refactor로 cache 전체가 무효화되는 것을 피하기 위함.)
+PROFILE_CONTEXT_VERSION = 1
 
 PROFILE_PROMPT = """[역할] 종목 프로파일링 전문가. 사업 구조를 분석하여 직접 경쟁사를 식별하고, 해당 종목에 최적화된 분석 지표를 선정.
 
@@ -59,6 +64,29 @@ PROFILE_PROMPT = """[역할] 종목 프로파일링 전문가. 사업 구조를 
 """
 
 
+def _compute_profile_hash() -> str:
+    """현재 profile 생성 설정의 sha256 hash (full 64 hex).
+
+    입력: PROFILE_PROMPT(텍스트) + GEMINI_MODEL + PROFILE_CONTEXT_VERSION.
+    prompt/model/context-version이 바뀌면 hash가 바뀐다. 함수 코드 자체는 포함하지 않는다.
+    """
+    payload = json.dumps(
+        {
+            "prompt": PROFILE_PROMPT,
+            "model": GEMINI_MODEL,
+            "context_version": PROFILE_CONTEXT_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# 모듈 로드 시 1회 계산 (PROFILE_PROMPT 정의 이후여야 함)
+CURRENT_PROFILE_HASH = _compute_profile_hash()
+
+
 async def get_stock_profile(ticker: str, overview: dict = None) -> dict:
     """종목별 AI 프로필 (경쟁사 + 핵심지표) 반환. DB 캐시 우선."""
     ticker = ticker.upper()
@@ -91,10 +119,24 @@ async def _get_cached_profile(ticker: str) -> dict | None:
             )
             row = await cursor.fetchone()
             if row:
+                # profile_hash 컬럼이 없는 옛 DB에서도 안전하게 처리 (방어적)
+                row_keys = row.keys()
+                row_hash = row["profile_hash"] if "profile_hash" in row_keys else None
+                analyzed_at = row["analyzed_at"] if "analyzed_at" in row_keys else None
+                # NULL이거나 현재 hash와 다르면 old/stale cache. stale이어도 자동 재호출하지 않는다.
+                stale = (row_hash is None) or (row_hash != CURRENT_PROFILE_HASH)
+                if stale:
+                    logger.info(
+                        "stock_profile_ai stale cache: ticker=%s row_hash=%s current=%s",
+                        ticker, row_hash, CURRENT_PROFILE_HASH,
+                    )
                 return {
                     "competitors": json.loads(row["competitors_json"]),
                     "key_metrics": json.loads(row["key_metrics_json"]),
                     "cached": True,
+                    "stale": stale,
+                    "profile_hash": row_hash,
+                    "analyzed_at": analyzed_at,
                 }
     except Exception as e:
         logger.warning("stock_profile_ai cache read error: %s", e)
@@ -106,13 +148,14 @@ async def _save_profile(ticker: str, profile: dict):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO stock_profile_ai
-                (ticker, competitors_json, key_metrics_json, analyzed_at)
-                VALUES (?, ?, ?, ?)
+                (ticker, competitors_json, key_metrics_json, analyzed_at, profile_hash)
+                VALUES (?, ?, ?, ?, ?)
             """, (
                 ticker,
                 json.dumps(profile["competitors"], ensure_ascii=False),
                 json.dumps(profile["key_metrics"], ensure_ascii=False),
                 datetime.now().isoformat(),
+                CURRENT_PROFILE_HASH,
             ))
             await db.commit()
     except Exception as e:
